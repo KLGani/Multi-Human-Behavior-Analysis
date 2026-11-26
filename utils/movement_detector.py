@@ -47,7 +47,7 @@ class MovementDetector:
             print(f"Error initializing MovementDetector: {e}")
             raise
 
-    def start_detection(self, session_id):
+    def start_detection(self, session_id, on_result=None):
         """Start head movement detection in a separate thread with OpenCV window"""
         try:
             if session_id in self.active_sessions:
@@ -59,7 +59,8 @@ class MovementDetector:
             # Initialize session data
             session_data = {
                 'session_id': session_id,
-                'status': 'starting'
+                'status': 'starting',
+                'latest_result': None
             }
             
             self.active_sessions[session_id] = session_data
@@ -70,7 +71,10 @@ class MovementDetector:
             self.calibration_count = 0
             
             # Start detection in a separate thread
-            thread = threading.Thread(target=self._run_movement_detection, args=(session_id,))
+            thread = threading.Thread(
+                target=self._run_movement_detection,
+                args=(session_id, on_result)
+            )
             thread.daemon = True
             thread.start()
             
@@ -88,7 +92,7 @@ class MovementDetector:
                 'message': f'Failed to start detection: {str(e)}'
             }
 
-    def _run_movement_detection(self, session_id):
+    def _run_movement_detection(self, session_id, on_result=None):
         """Run the actual head movement detection with OpenCV window"""
         cap = None
         try:
@@ -103,6 +107,7 @@ class MovementDetector:
                 return
 
             self.active_sessions[session_id]['status'] = 'running'
+            last_saved_at = 0.0
             
             print(f"Starting head movement detection for session {session_id}")
             print("Press 'Q' to stop detection")
@@ -123,6 +128,7 @@ class MovementDetector:
                 faces = self.detector(gray)
                 
                 for face in faces:
+                    result_to_save = None
                     try:
                         landmarks = self.predictor(gray, face)
                         
@@ -154,6 +160,22 @@ class MovementDetector:
                             
                             # Determine head direction with calibrated values
                             direction, color = self.determine_head_direction(calibrated_pitch, calibrated_yaw, roll)
+                            latest_result = {
+                                'direction': direction,
+                                'pitch': float(calibrated_pitch),
+                                'yaw': float(calibrated_yaw),
+                                'roll': float(roll)
+                            }
+                            self.active_sessions[session_id]['latest_result'] = latest_result
+                            now = time.monotonic()
+                            if on_result and now - last_saved_at >= 1.0:
+                                result_to_save = (
+                                    direction,
+                                    calibrated_pitch,
+                                    calibrated_yaw,
+                                    roll
+                                )
+                                last_saved_at = now
                         
                         # Draw face rectangle
                         x, y = face.left(), face.top()
@@ -184,6 +206,9 @@ class MovementDetector:
                     except Exception as e:
                         print(f"Error in pose estimation: {e}")
                         continue
+
+                    if result_to_save:
+                        on_result(*result_to_save)
 
                 # Display instructions and legend
                 cv2.putText(frame, "Head Movement Detection", (10, 30), 

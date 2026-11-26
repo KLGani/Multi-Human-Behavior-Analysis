@@ -59,6 +59,7 @@ def init_db():
                 activity TEXT NOT NULL,
                 confidence REAL NOT NULL,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                session_id TEXT,
                 FOREIGN KEY (user_id) REFERENCES users (id)
             )
         ''')
@@ -71,9 +72,17 @@ def init_db():
                 yaw REAL NOT NULL,
                 roll REAL NOT NULL,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                session_id TEXT,
                 FOREIGN KEY (user_id) REFERENCES users (id)
             )
         ''')
+        for table in ('activity_predictions', 'movement_predictions'):
+            columns = {
+                row['name']
+                for row in conn.execute(f'PRAGMA table_info({table})').fetchall()
+            }
+            if 'session_id' not in columns:
+                conn.execute(f'ALTER TABLE {table} ADD COLUMN session_id TEXT')
         conn.commit()
         conn.close()
 
@@ -152,12 +161,55 @@ def dashboard():
         ORDER BY timestamp DESC 
         LIMIT 10
     ''', (user_id,)).fetchall()
+
+    activity_stats = conn.execute('''
+        SELECT activity, COUNT(*) as count, AVG(confidence) as avg_confidence
+        FROM activity_predictions
+        WHERE user_id = ?
+        GROUP BY activity
+        ORDER BY count DESC
+    ''', (user_id,)).fetchall()
+    recent_activities = conn.execute('''
+        SELECT activity, confidence, datetime(timestamp, 'localtime') AS timestamp
+        FROM activity_predictions
+        WHERE user_id = ?
+        ORDER BY activity_predictions.timestamp DESC
+        LIMIT 10
+    ''', (user_id,)).fetchall()
+
+    movement_stats = conn.execute('''
+        SELECT direction, COUNT(*) as count,
+               AVG(pitch) as avg_pitch, AVG(yaw) as avg_yaw, AVG(roll) as avg_roll
+        FROM movement_predictions
+        WHERE user_id = ?
+        GROUP BY direction
+        ORDER BY count DESC
+    ''', (user_id,)).fetchall()
+    recent_movements = conn.execute('''
+        SELECT direction, pitch, yaw, roll, datetime(timestamp, 'localtime') AS timestamp
+        FROM movement_predictions
+        WHERE user_id = ?
+        ORDER BY movement_predictions.timestamp DESC
+        LIMIT 10
+    ''', (user_id,)).fetchall()
     
     conn.close()
+
+    emotion_total = sum(stat['count'] for stat in emotion_stats)
+    activity_total = sum(stat['count'] for stat in activity_stats)
+    movement_total = sum(stat['count'] for stat in movement_stats)
     
     return render_template('dashboard.html', 
                          emotion_stats=emotion_stats,
-                         recent_emotions=recent_emotions)
+                         recent_emotions=recent_emotions,
+                         activity_stats=activity_stats,
+                         recent_activities=recent_activities,
+                         movement_stats=movement_stats,
+                         recent_movements=recent_movements,
+                         emotion_total=emotion_total,
+                         activity_total=activity_total,
+                         movement_total=movement_total,
+                         total_predictions=emotion_total + activity_total + movement_total)
 
 @app.route('/emotion', methods=['GET', 'POST'])
 def emotion():
@@ -294,7 +346,13 @@ def start_movement_detection():
         return jsonify({'status': 'error', 'message': 'Not authenticated'}), 401
     
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    result = movement_detector.start_detection(session_id)
+    user_id = session['user_id']
+    result = movement_detector.start_detection(
+        session_id,
+        on_result=lambda direction, pitch, yaw, roll: save_movement_prediction(
+            user_id, session_id, direction, pitch, yaw, roll
+        )
+    )
     return jsonify(result)
 
 @app.route('/movement/check_status', methods=['GET'])
@@ -323,7 +381,13 @@ def start_activity_detection():
         return jsonify({'status': 'error', 'message': 'Not authenticated'}), 401
     
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    result = activity_detector.start_detection(session_id)
+    user_id = session['user_id']
+    result = activity_detector.start_detection(
+        session_id,
+        on_result=lambda activity, confidence: save_activity_prediction(
+            user_id, session_id, activity, confidence
+        )
+    )
     return jsonify(result)
 
 @app.route('/activity/check_status', methods=['GET'])
@@ -365,6 +429,30 @@ def check_emotion_status():
     status = emotion_detector.get_session_status(session_id)
     return jsonify(status)
 
+def save_activity_prediction(user_id, session_id, activity, confidence):
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            '''INSERT INTO activity_predictions (user_id, activity, confidence, session_id)
+               VALUES (?, ?, ?, ?)''',
+            (user_id, str(activity), float(confidence), session_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+def save_movement_prediction(user_id, session_id, direction, pitch, yaw, roll):
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            '''INSERT INTO movement_predictions
+               (user_id, direction, pitch, yaw, roll, session_id)
+               VALUES (?, ?, ?, ?, ?, ?)''',
+            (user_id, str(direction), float(pitch), float(yaw), float(roll), session_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 @app.route('/logout')

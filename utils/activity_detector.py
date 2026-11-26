@@ -31,7 +31,7 @@ class ActivityDetector:
             return True 
         return False
 
-    def start_detection(self, session_id):
+    def start_detection(self, session_id, on_result=None):
         """Start activity detection in a separate thread with OpenCV window"""
         try:
             if session_id in self.active_sessions:
@@ -43,13 +43,17 @@ class ActivityDetector:
             # Initialize session data
             session_data = {
                 'session_id': session_id,
-                'status': 'starting'
+                'status': 'starting',
+                'latest_result': None
             }
             
             self.active_sessions[session_id] = session_data
             
             # Start detection in a separate thread
-            thread = threading.Thread(target=self._run_activity_detection, args=(session_id,))
+            thread = threading.Thread(
+                target=self._run_activity_detection,
+                args=(session_id, on_result)
+            )
             thread.daemon = True
             thread.start()
             
@@ -67,7 +71,7 @@ class ActivityDetector:
                 'message': f'Failed to start detection: {str(e)}'
             }
 
-    def _run_activity_detection(self, session_id):
+    def _run_activity_detection(self, session_id, on_result=None):
         """Run the actual activity detection with OpenCV window"""
         cap = None
         try:
@@ -80,6 +84,7 @@ class ActivityDetector:
                 return
 
             self.active_sessions[session_id]['status'] = 'running'
+            last_saved_at = 0.0
             
             print(f"Starting activity detection for session {session_id}")
             print("Press 'Q' to stop detection")
@@ -122,6 +127,14 @@ class ActivityDetector:
                     if confidence > 0.75:
                         current_activity = pred
                         activity_color = (0, 255, 0)  # Green for high confidence
+                        self.active_sessions[session_id]['latest_result'] = {
+                            'activity': str(pred),
+                            'confidence': float(confidence)
+                        }
+                        now = time.monotonic()
+                        if on_result and now - last_saved_at >= 1.0:
+                            on_result(pred, confidence)
+                            last_saved_at = now
                         # Display activity on frame
                         cv2.putText(frm, f"{pred} ({confidence:.2f})", (50, 80), 
                                    cv2.FONT_ITALIC, 1.3, activity_color, 2)
